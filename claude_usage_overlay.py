@@ -7,17 +7,15 @@ from datetime import datetime
 from pathlib import Path
 import threading
 import time
-import webbrowser
-from http.server import HTTPServer, BaseHTTPRequestHandler
-from urllib.parse import parse_qs, urlparse
-import webview
+import asyncio
+from webview import create_window, start
+import webview.menu as wm
 
 class ClaudeUsageBar:
     def __init__(self):
         self.root = tk.Tk()
         self.root.title("Claude Usage")
         self.root.attributes('-topmost', True)
-        self.root.attributes('-transparentcolor', '#000001')
         self.root.overrideredirect(True)
         
         # Paths
@@ -34,18 +32,18 @@ class ClaudeUsageBar:
         self.drag_y = 0
         self.usage_data = None
         self.polling_active = True
-        self.login_window = None
-        
-        # Check if we have auth token
-        if not self.config.get('session_key'):
-            self.show_login()
+        self.webview_window = None
+        self.session_key_found = False
         
         # Setup UI
         self.setup_ui()
         self.position_window()
         
-        # Start polling in background thread
-        self.start_polling()
+        # Check if we have auth token
+        if not self.config.get('session_key'):
+            self.root.after(500, self.show_login_flow)
+        else:
+            self.start_polling()
         
     def load_config(self):
         default = {
@@ -69,136 +67,152 @@ class ClaudeUsageBar:
         with open(self.config_file, 'w') as f:
             json.dump(self.config, f, indent=2)
     
-    def show_login(self):
-        """Show login window with embedded browser"""
-        login_win = tk.Toplevel(self.root)
-        login_win.title("Login to Claude")
-        login_win.geometry("500x300")
-        login_win.configure(bg='#1a1a1a')
-        login_win.attributes('-topmost', True)
-        login_win.protocol("WM_DELETE_WINDOW", lambda: None)
+    def show_login_flow(self):
+        """Show login dialog and launch browser"""
+        login_dlg = tk.Toplevel(self.root)
+        login_dlg.title("Login Required")
+        login_dlg.geometry("450x200")
+        login_dlg.configure(bg='#1a1a1a')
+        login_dlg.attributes('-topmost', True)
+        login_dlg.protocol("WM_DELETE_WINDOW", lambda: None)
         
         # Center
-        login_win.update_idletasks()
-        x = (login_win.winfo_screenwidth() // 2) - 250
-        y = (login_win.winfo_screenheight() // 2) - 150
-        login_win.geometry(f'+{x}+{y}')
+        login_dlg.update_idletasks()
+        x = (login_dlg.winfo_screenwidth() // 2) - 225
+        y = (login_dlg.winfo_screenheight() // 2) - 100
+        login_dlg.geometry(f'+{x}+{y}')
         
         tk.Label(
-            login_win,
-            text="Claude Usage Tracker",
+            login_dlg,
+            text="🔐 Login to Claude",
             font=('Segoe UI', 16, 'bold'),
             fg='#CC785C',
             bg='#1a1a1a'
-        ).pack(pady=(30, 10))
-        
-        tk.Label(
-            login_win,
-            text="Click below to sign in with your Claude account",
-            font=('Segoe UI', 10),
-            fg='#999999',
-            bg='#1a1a1a'
-        ).pack(pady=(0, 30))
+        ).pack(pady=(30, 15))
         
         status_label = tk.Label(
-            login_win,
-            text="",
-            font=('Segoe UI', 9),
-            fg='#ffaa44',
+            login_dlg,
+            text="Click 'Sign In' to open login window",
+            font=('Segoe UI', 10),
+            fg='#999999',
             bg='#1a1a1a'
         )
         status_label.pack(pady=10)
         
-        def start_login():
-            login_btn.config(state='disabled', text="Opening browser...")
-            status_label.config(text="Please log in to claude.ai in the browser window")
-            login_win.update()
+        def start_browser_login():
+            btn.config(state='disabled', text="Opening...")
+            status_label.config(text="Please log in to Claude in the new window...")
+            login_dlg.update()
             
-            # Launch browser-based login
-            threading.Thread(target=lambda: self.browser_login(login_win, status_label, login_btn), daemon=True).start()
+            # Launch browser in separate thread
+            threading.Thread(
+                target=self.launch_login_browser,
+                args=(login_dlg, status_label),
+                daemon=True
+            ).start()
         
-        login_btn = tk.Button(
-            login_win,
-            text="Sign In with Claude",
-            command=start_login,
+        btn = tk.Button(
+            login_dlg,
+            text="Sign In",
+            command=start_browser_login,
             bg='#CC785C',
             fg='#ffffff',
             font=('Segoe UI', 11, 'bold'),
             relief='flat',
             cursor='hand2',
-            padx=40,
+            padx=50,
             pady=12
         )
-        login_btn.pack(pady=10)
-        
-        tk.Label(
-            login_win,
-            text="Your credentials are stored securely on your device",
-            font=('Segoe UI', 7),
-            fg='#666666',
-            bg='#1a1a1a'
-        ).pack(pady=(20, 0))
-        
-        login_win.wait_window()
+        btn.pack(pady=20)
     
-    def browser_login(self, login_win, status_label, login_btn):
-        """Open browser window for login and capture session"""
-        try:
-            # Create a webview window
-            self.login_window = webview.create_window(
-                'Sign in to Claude',
-                'https://claude.ai',
-                width=900,
-                height=700
-            )
+    def launch_login_browser(self, parent_window, status_label):
+        """Launch Edge WebView2 browser for login"""
+        
+        class API:
+            def __init__(self, app):
+                self.app = app
+                self.checking = True
             
-            # Monitor for cookies
-            def check_cookies():
-                while self.login_window:
+            def check_cookies(self):
+                """Called from JavaScript to check cookies"""
+                while self.checking and self.app.webview_window:
                     try:
-                        # Get cookies from webview
-                        cookies = self.login_window.get_cookies()
+                        # Evaluate JavaScript to get cookies
+                        js_code = """
+                        (function() {
+                            var cookies = document.cookie.split(';');
+                            for(var i = 0; i < cookies.length; i++) {
+                                var cookie = cookies[i].trim();
+                                if(cookie.startsWith('sessionKey=')) {
+                                    return cookie.substring(11);
+                                }
+                            }
+                            return null;
+                        })();
+                        """
                         
-                        # Look for sessionKey
-                        for cookie in cookies:
-                            if cookie.get('name') == 'sessionKey' and 'claude.ai' in cookie.get('domain', ''):
-                                session_key = cookie.get('value')
-                                if session_key:
-                                    # Found it!
-                                    self.config['session_key'] = session_key
-                                    self.save_config()
-                                    
-                                    # Update UI in main thread
-                                    login_win.after(0, lambda: [
-                                        status_label.config(text="✓ Login successful!", fg='#44ff44'),
-                                        login_win.after(1000, login_win.destroy)
-                                    ])
-                                    
-                                    # Close browser
-                                    self.login_window.destroy()
-                                    self.login_window = None
-                                    return
+                        result = self.app.webview_window.evaluate_js(js_code)
                         
-                        time.sleep(1)
+                        if result:
+                            self.app.config['session_key'] = result
+                            self.app.save_config()
+                            self.app.session_key_found = True
+                            self.checking = False
+                            
+                            # Close the browser window
+                            self.app.webview_window.destroy()
+                            
+                            # Update parent UI
+                            parent_window.after(0, lambda: [
+                                status_label.config(text="✓ Login successful!", fg='#44ff44'),
+                                parent_window.after(1000, parent_window.destroy)
+                            ])
+                            
+                            # Start polling
+                            self.app.root.after(0, self.app.start_polling)
+                            return
+                        
+                        time.sleep(2)  # Check every 2 seconds
                     except:
-                        break
-            
-            # Start cookie monitoring in background
-            threading.Thread(target=check_cookies, daemon=True).start()
-            
-            # Start webview (blocking call)
-            webview.start()
-            
-        except Exception as e:
-            login_win.after(0, lambda: [
-                status_label.config(text=f"Error: {str(e)}", fg='#ff4444'),
-                login_btn.config(state='normal', text="Sign In with Claude")
+                        time.sleep(2)
+        
+        api = API(self)
+        
+        # Create webview window
+        self.webview_window = create_window(
+            'Sign in to Claude',
+            'https://claude.ai',
+            width=1000,
+            height=800,
+            resizable=True,
+            js_api=api
+        )
+        
+        # Start cookie checking in background
+        def start_checking():
+            time.sleep(3)  # Wait for page to load
+            api.check_cookies()
+        
+        threading.Thread(target=start_checking, daemon=True).start()
+        
+        # Start webview - this blocks until window closes
+        try:
+            start()
+        except:
+            pass
+        
+        # If we get here and no session key found
+        if not self.session_key_found:
+            parent_window.after(0, lambda: [
+                status_label.config(text="Login cancelled. Please try again.", fg='#ff4444')
             ])
     
     def fetch_usage_data(self):
         """Fetch usage data from Claude API"""
+        if not self.config.get('session_key'):
+            return None
+            
         try:
-            # Use claude.ai's internal API
             headers = {
                 'Accept': 'application/json',
                 'Content-Type': 'application/json',
@@ -208,7 +222,7 @@ class ClaudeUsageBar:
                 'Referer': 'https://claude.ai/'
             }
             
-            # Try to get account info and usage
+            # Get organizations
             response = requests.get(
                 'https://claude.ai/api/organizations',
                 headers=headers,
@@ -220,7 +234,7 @@ class ClaudeUsageBar:
                 if orgs and len(orgs) > 0:
                     org_id = orgs[0].get('uuid')
                     
-                    # Get usage for this org
+                    # Get usage
                     usage_response = requests.get(
                         f'https://claude.ai/api/organizations/{org_id}/usage',
                         headers=headers,
@@ -246,8 +260,7 @@ class ClaudeUsageBar:
                                "Your session has expired. Would you like to log in again?"):
             self.config['session_key'] = None
             self.save_config()
-            self.show_login()
-            self.start_polling()
+            self.show_login_flow()
     
     def polling_loop(self):
         """Background thread for polling API"""
@@ -266,11 +279,14 @@ class ClaudeUsageBar:
         poll_thread.start()
         
         # Initial fetch
-        threading.Thread(target=lambda: [
-            time.sleep(0.5),
-            setattr(self, 'usage_data', self.fetch_usage_data()),
-            self.root.after(0, self.update_progress)
-        ], daemon=True).start()
+        def initial_fetch():
+            time.sleep(0.5)
+            data = self.fetch_usage_data()
+            if data:
+                self.usage_data = data
+                self.root.after(0, self.update_progress)
+        
+        threading.Thread(target=initial_fetch, daemon=True).start()
     
     def setup_ui(self):
         self.main_frame = tk.Frame(
@@ -281,7 +297,7 @@ class ClaudeUsageBar:
         )
         self.main_frame.pack(fill='both', expand=True, padx=1, pady=1)
         
-        self.root.configure(bg='#000001')
+        self.root.configure(bg='#1a1a1a')
         
         # Header
         self.header = tk.Frame(self.main_frame, bg='#2a2a2a', height=28)
@@ -428,28 +444,45 @@ class ClaudeUsageBar:
         if not self.usage_data:
             return
         
-        # Parse usage data (structure varies by API response)
-        # This is a simplified version - adjust based on actual API response
         try:
-            if 'usage_data' in self.usage_data:
-                usage_pct = self.usage_data['usage_data'].get('percentage', 0)
-                self.usage_label.config(text=f"{usage_pct:.1f}% of limit used")
-                
-                # Update progress bar
-                bar_width = int((usage_pct / 100) * 284)
-                self.progress_fill.place(width=bar_width)
-                
-                # Color based on usage
-                if usage_pct >= 90:
-                    self.progress_fill.config(bg='#ff4444')
-                elif usage_pct >= 70:
-                    self.progress_fill.config(bg='#ffaa44')
-                else:
-                    self.progress_fill.config(bg='#CC785C')
+            usage_pct = 0
+            
+            if isinstance(self.usage_data, dict):
+                if 'usage_percentage' in self.usage_data:
+                    usage_pct = self.usage_data['usage_percentage']
+                elif 'usage_data' in self.usage_data and 'percentage' in self.usage_data['usage_data']:
+                    usage_pct = self.usage_data['usage_data']['percentage']
+                elif 'current' in self.usage_data and 'limit' in self.usage_data:
+                    current = self.usage_data['current']
+                    limit = self.usage_data['limit']
+                    if limit > 0:
+                        usage_pct = (current / limit) * 100
+                elif 'usage' in self.usage_data:
+                    usage = self.usage_data['usage']
+                    if isinstance(usage, dict):
+                        if 'percentage' in usage:
+                            usage_pct = usage['percentage']
+                        elif 'current' in usage and 'limit' in usage:
+                            if usage['limit'] > 0:
+                                usage_pct = (usage['current'] / usage['limit']) * 100
+            
+            self.usage_label.config(text=f"{usage_pct:.1f}% of limit used")
+            
+            # Update progress bar
+            bar_width = int((usage_pct / 100) * 284)
+            self.progress_fill.place(width=bar_width)
+            
+            # Color based on usage
+            if usage_pct >= 90:
+                self.progress_fill.config(bg='#ff4444')
+            elif usage_pct >= 70:
+                self.progress_fill.config(bg='#ffaa44')
             else:
-                self.usage_label.config(text="Usage data available")
+                self.progress_fill.config(bg='#CC785C')
+                
         except Exception as e:
             print(f"Error updating progress: {e}")
+            self.usage_label.config(text="Connected")
         
         # Schedule next update
         self.root.after(1000, self.update_progress)
@@ -553,9 +586,9 @@ class ClaudeUsageBar:
     
     def on_close(self, event=None):
         self.polling_active = False
-        if self.login_window:
+        if self.webview_window:
             try:
-                self.login_window.destroy()
+                self.webview_window.destroy()
             except:
                 pass
         self.root.quit()
