@@ -327,35 +327,59 @@ class ClaudeUsageBar:
             self.login_in_progress = False
     
     def fetch_usage_data(self):
-        """Fetch usage data from Claude API"""
+        """Fetch usage data from Claude API using requests with cloudflare bypass"""
         if not self.config.get('session_key'):
             print("No session key available")
             return None
             
         try:
-            # Use full cookie string if available, otherwise just sessionKey
+            # Use cloudscraper to bypass Cloudflare
+            try:
+                import cloudscraper
+            except ImportError:
+                print("Installing cloudscraper...")
+                import subprocess
+                import sys
+                subprocess.check_call([sys.executable, "-m", "pip", "install", "cloudscraper"])
+                import cloudscraper
+            
+            # Create a scraper that bypasses Cloudflare
+            scraper = cloudscraper.create_scraper(
+                browser={
+                    'browser': 'chrome',
+                    'platform': 'windows',
+                    'mobile': False
+                }
+            )
+            
+            # Use full cookie string if available
             cookie_string = self.config.get('cookie_string', f'sessionKey={self.config["session_key"]}')
             
             headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/115.0',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
                 'Accept': 'application/json',
-                'Accept-Language': 'en-US,en;q=0.5',
+                'Accept-Language': 'en-US,en;q=0.9',
                 'Referer': 'https://claude.ai/chats',
-                'Content-Type': 'application/json',
                 'Sec-Fetch-Dest': 'empty',
                 'Sec-Fetch-Mode': 'cors',
                 'Sec-Fetch-Site': 'same-origin',
-                'Connection': 'keep-alive',
-                'Cookie': cookie_string
+                'sec-ch-ua': '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+                'sec-ch-ua-mobile': '?0',
+                'sec-ch-ua-platform': '"Windows"',
             }
             
-            print(f"Using cookies: {cookie_string[:100]}...")
-            print("Fetching organizations...")
+            # Set cookies
+            for cookie_pair in cookie_string.split('; '):
+                if '=' in cookie_pair:
+                    name, value = cookie_pair.split('=', 1)
+                    scraper.cookies.set(name, value, domain='claude.ai')
+            
+            print("Fetching organizations with cloudscraper...")
             # Get organizations
-            response = requests.get(
+            response = scraper.get(
                 'https://claude.ai/api/organizations',
                 headers=headers,
-                timeout=10
+                timeout=15
             )
             
             print(f"Organizations response: {response.status_code}")
@@ -370,10 +394,10 @@ class ClaudeUsageBar:
                     
                     # Get usage
                     print("Fetching usage data...")
-                    usage_response = requests.get(
+                    usage_response = scraper.get(
                         f'https://claude.ai/api/organizations/{org_id}/usage',
                         headers=headers,
-                        timeout=10
+                        timeout=15
                     )
                     
                     print(f"Usage response: {usage_response.status_code}")
@@ -388,8 +412,8 @@ class ClaudeUsageBar:
                 self.root.after(0, self.handle_auth_error)
                 return None
             elif response.status_code == 403:
-                print("Forbidden (403) - Cookies may be invalid or incomplete")
-                print(f"Response: {response.text[:200]}")
+                print("Forbidden (403)")
+                print(f"Response snippet: {response.text[:500]}")
                 return None
             
             print("No usage data available")
