@@ -218,13 +218,18 @@ class ClaudeUsageBar:
             max_wait = 300  # 5 minutes
             elapsed = 0
             
+            print("Waiting for sessionKey cookie...")
+            
             while elapsed < max_wait and not session_key and self.login_in_progress:
                 try:
                     # Check cookies
                     cookies = self.driver.get_cookies()
+                    print(f"[{elapsed}s] Checking cookies... Found {len(cookies)} cookies")
+                    
                     for cookie in cookies:
                         if cookie['name'] == 'sessionKey':
                             session_key = cookie['value']
+                            print(f"✓ Found sessionKey: {session_key[:20]}...")
                             break
                     
                     if session_key:
@@ -232,9 +237,10 @@ class ClaudeUsageBar:
                     
                     # Check if browser was closed by user
                     try:
-                        _ = self.driver.current_url
-                    except:
-                        # Browser closed
+                        url = self.driver.current_url
+                        print(f"Current URL: {url}")
+                    except Exception as url_error:
+                        print(f"Browser closed by user: {url_error}")
                         break
                     
                     time.sleep(2)
@@ -242,20 +248,29 @@ class ClaudeUsageBar:
                     
                 except Exception as e:
                     print(f"Error checking cookies: {e}")
+                    import traceback
+                    traceback.print_exc()
                     break
+            
+            print(f"Cookie check loop ended. Session key found: {session_key is not None}")
             
             # Close browser
             if self.driver:
                 try:
+                    print("Closing browser...")
                     self.driver.quit()
-                except:
-                    pass
-                self.driver = None
+                    print("Browser closed successfully")
+                except Exception as quit_error:
+                    print(f"Error closing browser: {quit_error}")
+                finally:
+                    self.driver = None
             
             if session_key:
                 # Success!
+                print(f"Saving session key: {session_key[:20]}...")
                 self.config['session_key'] = session_key
                 self.save_config()
+                print("Config saved!")
                 
                 self.root.after(0, lambda: [
                     self.status_label.config(text="✓ Login successful!", fg='#44ff44'),
@@ -267,14 +282,17 @@ class ClaudeUsageBar:
                     self.login_dialog.destroy() if hasattr(self, 'login_dialog') else None,
                     self.start_polling()
                 ])
+                print("Starting polling...")
             else:
                 # Timeout or closed
+                print("No session key found - login cancelled or timeout")
                 self.root.after(0, lambda: [
                     self.status_label.config(text="Login cancelled or timeout. Try again.", fg='#ff4444'),
                     self.login_button.config(state='normal', text="Sign In")
                 ])
             
             self.login_in_progress = False
+            print("Login process complete")
         
         except Exception as e:
             print(f"Login error: {e}")
@@ -297,18 +315,24 @@ class ClaudeUsageBar:
     def fetch_usage_data(self):
         """Fetch usage data from Claude API"""
         if not self.config.get('session_key'):
+            print("No session key available")
             return None
             
         try:
             headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/115.0',
                 'Accept': 'application/json',
+                'Accept-Language': 'en-US,en;q=0.5',
+                'Referer': 'https://claude.ai/chats',
                 'Content-Type': 'application/json',
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                'Cookie': f'sessionKey={self.config["session_key"]}',
-                'Origin': 'https://claude.ai',
-                'Referer': 'https://claude.ai/'
+                'Sec-Fetch-Dest': 'empty',
+                'Sec-Fetch-Mode': 'cors',
+                'Sec-Fetch-Site': 'same-origin',
+                'Connection': 'keep-alive',
+                'Cookie': f'sessionKey={self.config["session_key"]}'
             }
             
+            print("Fetching organizations...")
             # Get organizations
             response = requests.get(
                 'https://claude.ai/api/organizations',
@@ -316,29 +340,43 @@ class ClaudeUsageBar:
                 timeout=10
             )
             
+            print(f"Organizations response: {response.status_code}")
+            
             if response.status_code == 200:
                 orgs = response.json()
+                print(f"Found {len(orgs)} organizations")
+                
                 if orgs and len(orgs) > 0:
                     org_id = orgs[0].get('uuid')
+                    print(f"Using org: {org_id}")
                     
                     # Get usage
+                    print("Fetching usage data...")
                     usage_response = requests.get(
                         f'https://claude.ai/api/organizations/{org_id}/usage',
                         headers=headers,
                         timeout=10
                     )
                     
+                    print(f"Usage response: {usage_response.status_code}")
+                    
                     if usage_response.status_code == 200:
-                        return usage_response.json()
+                        usage_data = usage_response.json()
+                        print(f"Usage data: {usage_data}")
+                        return usage_data
             
             elif response.status_code == 401:
+                print("Session expired (401)")
                 self.root.after(0, self.handle_auth_error)
                 return None
             
+            print("No usage data available")
             return None
                 
         except Exception as e:
             print(f"Error fetching usage: {e}")
+            import traceback
+            traceback.print_exc()
             return None
     
     def handle_auth_error(self):
