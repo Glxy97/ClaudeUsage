@@ -7,9 +7,7 @@ from datetime import datetime
 from pathlib import Path
 import threading
 import time
-import asyncio
-from webview import create_window, start
-import webview.menu as wm
+import sys
 
 class ClaudeUsageBar:
     def __init__(self):
@@ -32,8 +30,8 @@ class ClaudeUsageBar:
         self.drag_y = 0
         self.usage_data = None
         self.polling_active = True
-        self.webview_window = None
-        self.session_key_found = False
+        self.driver = None
+        self.login_in_progress = False
         
         # Setup UI
         self.setup_ui()
@@ -41,7 +39,7 @@ class ClaudeUsageBar:
         
         # Check if we have auth token
         if not self.config.get('session_key'):
-            self.root.after(500, self.show_login_flow)
+            self.root.after(500, self.show_login_dialog)
         else:
             self.start_polling()
         
@@ -67,54 +65,57 @@ class ClaudeUsageBar:
         with open(self.config_file, 'w') as f:
             json.dump(self.config, f, indent=2)
     
-    def show_login_flow(self):
-        """Show login dialog and launch browser"""
-        login_dlg = tk.Toplevel(self.root)
-        login_dlg.title("Login Required")
-        login_dlg.geometry("450x200")
-        login_dlg.configure(bg='#1a1a1a')
-        login_dlg.attributes('-topmost', True)
-        login_dlg.protocol("WM_DELETE_WINDOW", lambda: None)
+    def show_login_dialog(self):
+        """Show login dialog"""
+        self.login_dialog = tk.Toplevel(self.root)
+        self.login_dialog.title("Login Required")
+        self.login_dialog.geometry("420x200")
+        self.login_dialog.configure(bg='#1a1a1a')
+        self.login_dialog.attributes('-topmost', True)
+        self.login_dialog.protocol("WM_DELETE_WINDOW", self.on_login_dialog_close)
         
         # Center
-        login_dlg.update_idletasks()
-        x = (login_dlg.winfo_screenwidth() // 2) - 225
-        y = (login_dlg.winfo_screenheight() // 2) - 100
-        login_dlg.geometry(f'+{x}+{y}')
+        self.login_dialog.update_idletasks()
+        x = (self.login_dialog.winfo_screenwidth() // 2) - 210
+        y = (self.login_dialog.winfo_screenheight() // 2) - 100
+        self.login_dialog.geometry(f'+{x}+{y}')
         
         tk.Label(
-            login_dlg,
-            text="🔐 Login to Claude",
+            self.login_dialog,
+            text="🔐 Sign in to Claude",
             font=('Segoe UI', 16, 'bold'),
             fg='#CC785C',
             bg='#1a1a1a'
-        ).pack(pady=(30, 15))
+        ).pack(pady=(25, 10))
         
-        status_label = tk.Label(
-            login_dlg,
-            text="Click 'Sign In' to open login window",
-            font=('Segoe UI', 10),
+        self.status_label = tk.Label(
+            self.login_dialog,
+            text="A browser window will open for login",
+            font=('Segoe UI', 9),
             fg='#999999',
             bg='#1a1a1a'
         )
-        status_label.pack(pady=10)
+        self.status_label.pack(pady=10)
         
-        def start_browser_login():
-            btn.config(state='disabled', text="Opening...")
-            status_label.config(text="Please log in to Claude in the new window...")
-            login_dlg.update()
+        def start_login():
+            if self.login_in_progress:
+                return
+                
+            self.login_button.config(state='disabled', text="Opening browser...")
+            self.status_label.config(text="Launching browser...", fg='#ffaa44')
+            self.login_dialog.update()
             
-            # Launch browser in separate thread
+            # Launch browser in background thread
+            self.login_in_progress = True
             threading.Thread(
-                target=self.launch_login_browser,
-                args=(login_dlg, status_label),
+                target=self.automated_browser_login,
                 daemon=True
             ).start()
         
-        btn = tk.Button(
-            login_dlg,
+        self.login_button = tk.Button(
+            self.login_dialog,
             text="Sign In",
-            command=start_browser_login,
+            command=start_login,
             bg='#CC785C',
             fg='#ffffff',
             font=('Segoe UI', 11, 'bold'),
@@ -123,89 +124,175 @@ class ClaudeUsageBar:
             padx=50,
             pady=12
         )
-        btn.pack(pady=20)
-    
-    def launch_login_browser(self, parent_window, status_label):
-        """Launch Edge WebView2 browser for login"""
+        self.login_button.pack(pady=15)
         
-        class API:
-            def __init__(self, app):
-                self.app = app
-                self.checking = True
-            
-            def check_cookies(self):
-                """Called from JavaScript to check cookies"""
-                while self.checking and self.app.webview_window:
-                    try:
-                        # Evaluate JavaScript to get cookies
-                        js_code = """
-                        (function() {
-                            var cookies = document.cookie.split(';');
-                            for(var i = 0; i < cookies.length; i++) {
-                                var cookie = cookies[i].trim();
-                                if(cookie.startsWith('sessionKey=')) {
-                                    return cookie.substring(11);
-                                }
-                            }
-                            return null;
-                        })();
-                        """
-                        
-                        result = self.app.webview_window.evaluate_js(js_code)
-                        
-                        if result:
-                            self.app.config['session_key'] = result
-                            self.app.save_config()
-                            self.app.session_key_found = True
-                            self.checking = False
-                            
-                            # Close the browser window
-                            self.app.webview_window.destroy()
-                            
-                            # Update parent UI
-                            parent_window.after(0, lambda: [
-                                status_label.config(text="✓ Login successful!", fg='#44ff44'),
-                                parent_window.after(1000, parent_window.destroy)
-                            ])
-                            
-                            # Start polling
-                            self.app.root.after(0, self.app.start_polling)
-                            return
-                        
-                        time.sleep(2)  # Check every 2 seconds
-                    except:
-                        time.sleep(2)
-        
-        api = API(self)
-        
-        # Create webview window
-        self.webview_window = create_window(
-            'Sign in to Claude',
-            'https://claude.ai',
-            width=1000,
-            height=800,
-            resizable=True,
-            js_api=api
+        # Cancel button
+        cancel_btn = tk.Button(
+            self.login_dialog,
+            text="Cancel",
+            command=self.on_login_dialog_close,
+            bg='#3a3a3a',
+            fg='#cccccc',
+            font=('Segoe UI', 9),
+            relief='flat',
+            cursor='hand2',
+            padx=30,
+            pady=6
         )
+        cancel_btn.pack()
+    
+    def on_login_dialog_close(self):
+        """Handle login dialog close"""
+        if self.driver:
+            try:
+                self.driver.quit()
+            except:
+                pass
+            self.driver = None
         
-        # Start cookie checking in background
-        def start_checking():
-            time.sleep(3)  # Wait for page to load
-            api.check_cookies()
+        self.login_in_progress = False
         
-        threading.Thread(target=start_checking, daemon=True).start()
+        if hasattr(self, 'login_dialog'):
+            try:
+                self.login_dialog.destroy()
+            except:
+                pass
         
-        # Start webview - this blocks until window closes
+        # If no session key, quit the app
+        if not self.config.get('session_key'):
+            self.root.quit()
+    
+    def automated_browser_login(self):
+        """Open browser with undetected-chromedriver to bypass Cloudflare"""
         try:
-            start()
-        except:
-            pass
+            # Import undetected_chromedriver
+            try:
+                import undetected_chromedriver as uc
+            except ImportError:
+                self.root.after(0, lambda: [
+                    self.status_label.config(
+                        text="Installing undetected-chromedriver...",
+                        fg='#ffaa44'
+                    )
+                ])
+                # Try to install it
+                import subprocess
+                subprocess.check_call([sys.executable, "-m", "pip", "install", "undetected-chromedriver"])
+                import undetected_chromedriver as uc
+            
+            self.root.after(0, lambda: self.status_label.config(
+                text="Starting browser (bypassing Cloudflare)...",
+                fg='#ffaa44'
+            ))
+            
+            # Create undetected Chrome driver
+            options = uc.ChromeOptions()
+            options.add_argument('--start-maximized')
+            
+            try:
+                self.driver = uc.Chrome(options=options, use_subprocess=True)
+            except Exception as e:
+                self.root.after(0, lambda: [
+                    self.status_label.config(
+                        text=f"Browser error: {str(e)[:40]}",
+                        fg='#ff4444'
+                    ),
+                    self.login_button.config(state='normal', text="Sign In")
+                ])
+                self.login_in_progress = False
+                return
+            
+            # Navigate to Claude
+            self.root.after(0, lambda: self.status_label.config(
+                text="Please log in to claude.ai in the browser...",
+                fg='#ffaa44'
+            ))
+            
+            self.driver.get('https://claude.ai')
+            
+            # Give it a moment to load
+            time.sleep(3)
+            
+            # Wait for user to log in
+            session_key = None
+            max_wait = 300  # 5 minutes
+            elapsed = 0
+            
+            while elapsed < max_wait and not session_key and self.login_in_progress:
+                try:
+                    # Check cookies
+                    cookies = self.driver.get_cookies()
+                    for cookie in cookies:
+                        if cookie['name'] == 'sessionKey':
+                            session_key = cookie['value']
+                            break
+                    
+                    if session_key:
+                        break
+                    
+                    # Check if browser was closed by user
+                    try:
+                        _ = self.driver.current_url
+                    except:
+                        # Browser closed
+                        break
+                    
+                    time.sleep(2)
+                    elapsed += 2
+                    
+                except Exception as e:
+                    print(f"Error checking cookies: {e}")
+                    break
+            
+            # Close browser
+            if self.driver:
+                try:
+                    self.driver.quit()
+                except:
+                    pass
+                self.driver = None
+            
+            if session_key:
+                # Success!
+                self.config['session_key'] = session_key
+                self.save_config()
+                
+                self.root.after(0, lambda: [
+                    self.status_label.config(text="✓ Login successful!", fg='#44ff44'),
+                ])
+                
+                # Close dialog and start polling
+                time.sleep(1)
+                self.root.after(0, lambda: [
+                    self.login_dialog.destroy() if hasattr(self, 'login_dialog') else None,
+                    self.start_polling()
+                ])
+            else:
+                # Timeout or closed
+                self.root.after(0, lambda: [
+                    self.status_label.config(text="Login cancelled or timeout. Try again.", fg='#ff4444'),
+                    self.login_button.config(state='normal', text="Sign In")
+                ])
+            
+            self.login_in_progress = False
         
-        # If we get here and no session key found
-        if not self.session_key_found:
-            parent_window.after(0, lambda: [
-                status_label.config(text="Login cancelled. Please try again.", fg='#ff4444')
+        except Exception as e:
+            print(f"Login error: {e}")
+            import traceback
+            traceback.print_exc()
+            
+            if self.driver:
+                try:
+                    self.driver.quit()
+                except:
+                    pass
+                self.driver = None
+            
+            self.root.after(0, lambda: [
+                self.status_label.config(text=f"Error: {str(e)[:40]}", fg='#ff4444'),
+                self.login_button.config(state='normal', text="Sign In")
             ])
+            self.login_in_progress = False
     
     def fetch_usage_data(self):
         """Fetch usage data from Claude API"""
@@ -260,7 +347,7 @@ class ClaudeUsageBar:
                                "Your session has expired. Would you like to log in again?"):
             self.config['session_key'] = None
             self.save_config()
-            self.show_login_flow()
+            self.show_login_dialog()
     
     def polling_loop(self):
         """Background thread for polling API"""
@@ -586,9 +673,9 @@ class ClaudeUsageBar:
     
     def on_close(self, event=None):
         self.polling_active = False
-        if self.webview_window:
+        if self.driver:
             try:
-                self.webview_window.destroy()
+                self.driver.quit()
             except:
                 pass
         self.root.quit()
