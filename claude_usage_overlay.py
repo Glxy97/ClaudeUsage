@@ -472,7 +472,8 @@ class ClaudeUsageBar:
             bg='#2a2a2a',
             cursor='hand2'
         )
-        self.title_label.pack(side='left', padx=(4, 8), pady=4)
+        # Fixed title padding to ensure right-side buttons aren't pushed off
+        self.title_label.pack(side='left', padx=(4, 4), pady=4)
         
         # Dragging
         for widget in [self.header, self.title_label]:
@@ -484,11 +485,11 @@ class ClaudeUsageBar:
         btn_frame = tk.Frame(self.header, bg='#2a2a2a')
         btn_frame.pack(side='right')
         
-        # Refresh
+        # Refresh icon - Using \u21BB and specific Symbol font for reliable rendering
         self.refresh_btn = tk.Label(
             btn_frame,
-            text="⟳",
-            font=('Segoe UI', 11, 'bold'),
+            text="\u21BB", 
+            font=('Segoe UI Symbol', 11, 'bold'),
             fg='#888888',
             bg='#2a2a2a',
             cursor='hand2',
@@ -981,11 +982,8 @@ class ClaudeUsageBar:
         
         if self.clickthrough_enabled:
             # Enable clickthrough - make window transparent to clicks
-            # On Windows, use -transparentcolor
             self.root.wm_attributes('-transparentcolor', '#1a1a1a')
             self.clickthrough_btn.config(fg='#44ff44')  # Green when active
-            
-            # Keep only the clickthrough button clickable by making it a different color
             self.clickthrough_btn.config(bg='#2a2a2a')
         else:
             # Disable clickthrough
