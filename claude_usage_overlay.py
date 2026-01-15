@@ -33,6 +33,7 @@ class ClaudeUsageBar:
         self.driver = None
         self.login_in_progress = False
         self.settings_window = None
+        self.clickthrough_enabled = False
         
         # Setup UI
         self.setup_ui()
@@ -445,6 +446,24 @@ class ClaudeUsageBar:
         self.header.pack(fill='x', padx=6, pady=(6, 0))
         self.header.pack_propagate(False)
         
+        # Clickthrough toggle button (always on top left)
+        self.clickthrough_btn = tk.Label(
+            self.header,
+            text="👆",
+            font=('Segoe UI', 10),
+            fg='#888888',
+            bg='#2a2a2a',
+            cursor='hand2',
+            padx=4
+        )
+        self.clickthrough_btn.pack(side='left', padx=(4, 0))
+        self.clickthrough_btn.bind('<Button-1>', self.toggle_clickthrough)
+        self.clickthrough_btn.bind('<Enter>', self.on_clickthrough_hover)
+        self.clickthrough_btn.bind('<Leave>', self.on_clickthrough_leave)
+        
+        # Tooltip for clickthrough
+        self.clickthrough_tooltip = None
+        
         self.title_label = tk.Label(
             self.header,
             text="Claude Usage",
@@ -453,7 +472,7 @@ class ClaudeUsageBar:
             bg='#2a2a2a',
             cursor='hand2'
         )
-        self.title_label.pack(side='left', padx=8, pady=4)
+        self.title_label.pack(side='left', padx=(4, 8), pady=4)
         
         # Dragging
         for widget in [self.header, self.title_label]:
@@ -955,6 +974,67 @@ class ClaudeUsageBar:
             except:
                 pass
             self.settings_window = None
+    
+    def toggle_clickthrough(self, event=None):
+        """Toggle clickthrough mode"""
+        self.clickthrough_enabled = not self.clickthrough_enabled
+        
+        if self.clickthrough_enabled:
+            # Enable clickthrough - make window transparent to clicks
+            # On Windows, use -transparentcolor
+            self.root.wm_attributes('-transparentcolor', '#1a1a1a')
+            self.clickthrough_btn.config(fg='#44ff44')  # Green when active
+            
+            # Keep only the clickthrough button clickable by making it a different color
+            self.clickthrough_btn.config(bg='#2a2a2a')
+        else:
+            # Disable clickthrough
+            self.root.wm_attributes('-transparentcolor', '')
+            self.clickthrough_btn.config(fg='#888888', bg='#2a2a2a')
+    
+    def on_clickthrough_hover(self, event):
+        """Show tooltip on hover"""
+        if self.clickthrough_enabled:
+            tooltip_text = "Disable clickthrough"
+            self.clickthrough_btn.config(fg='#66ff66')
+        else:
+            tooltip_text = "Enable clickthrough"
+            self.clickthrough_btn.config(fg='#ffffff')
+        
+        # Create tooltip
+        if not self.clickthrough_tooltip:
+            self.clickthrough_tooltip = tk.Toplevel(self.root)
+            self.clickthrough_tooltip.wm_overrideredirect(True)
+            self.clickthrough_tooltip.wm_attributes('-topmost', True)
+            
+            label = tk.Label(
+                self.clickthrough_tooltip,
+                text=tooltip_text,
+                bg='#3a3a3a',
+                fg='#ffffff',
+                font=('Segoe UI', 8),
+                padx=8,
+                pady=4,
+                relief='solid',
+                borderwidth=1
+            )
+            label.pack()
+            
+            # Position below the button
+            x = self.clickthrough_btn.winfo_rootx()
+            y = self.clickthrough_btn.winfo_rooty() + self.clickthrough_btn.winfo_height() + 2
+            self.clickthrough_tooltip.wm_geometry(f"+{x}+{y}")
+    
+    def on_clickthrough_leave(self, event):
+        """Hide tooltip on leave"""
+        if self.clickthrough_tooltip:
+            self.clickthrough_tooltip.destroy()
+            self.clickthrough_tooltip = None
+        
+        if self.clickthrough_enabled:
+            self.clickthrough_btn.config(fg='#44ff44')
+        else:
+            self.clickthrough_btn.config(fg='#888888')
     
     def on_close(self, event=None):
         self.polling_active = False
